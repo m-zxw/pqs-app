@@ -162,15 +162,24 @@ with st.sidebar:
     st.write("Map raw WhatsApp numbers to your staff names below.")
     mapping_file = "saved_senders.json"
     
-    # Load logic
+   # Load logic
+    default_list = [
+        {"Raw Number/Name": "+92 346 2727806", "Employee Name": "Shahzad"},
+        {"Raw Number/Name": "+92 315 8139861", "Employee Name": "Umair"},
+        {"Raw Number/Name": "+92 307 1696112", "Employee Name": "Haque Nawaz"},
+        {"Raw Number/Name": "+92 316 8632889", "Employee Name": "Danish"},
+        {"Raw Number/Name": "+92 345 1684108", "Employee Name": "Mehboob"},
+        {"Raw Number/Name": "+92 310 0082359", "Employee Name": "Wajeeh"}
+    ]
+    
     if os.path.exists(mapping_file):
         try:
             with open(mapping_file, "r") as f:
                 current_list = json.load(f)
         except:
-            current_list = [{"Raw Number/Name": "+92 346 2727806", "Employee Name": "Shahzad"}]
+            current_list = default_list # Uses the full list if file breaks
     else:
-        current_list = [{"Raw Number/Name": "+92 346 2727806", "Employee Name": "Shahzad"}]
+        current_list = default_list # Uses the full list on first run
         
     edited_mapping = st.data_editor(pd.DataFrame(current_list), num_rows="dynamic", use_container_width=True)
     
