@@ -16,7 +16,7 @@ def get_shift(hour):
     elif 16 <= hour < 23: return 'B'
     else: return 'C'
 
-def parse_whatsapp_data(text_content, sender_mapping):
+def parse_whatsapp_data(text_content, sender_mapping, is_dayfirst):
     timestamp_pattern = r'(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4}(?:,?\s+|\s+)\d{1,2}[:\.]\d{2}(?:\s*[APap][Mm])?)'
     message_splits = re.split(timestamp_pattern, text_content)
 
@@ -30,7 +30,6 @@ def parse_whatsapp_data(text_content, sender_mapping):
         "Bar Temp. Before PQS", "Bar Temp at Cooling Bed", "PQS Water Temperature"
     ]
 
-    # Helper: Extracts first number after a keyword
     def get_num(keyword, text):
         m = re.search(rf'{keyword}[^\d\n]*(\d+(?:\.\d+)?)', text, re.IGNORECASE)
         return m.group(1) if m else ""
@@ -38,19 +37,18 @@ def parse_whatsapp_data(text_content, sender_mapping):
     for i in range(1, len(message_splits), 2):
         ts_str = message_splits[i].strip()
         
-        # Clean the text: Remove WhatsApp edits and ALL asterisks to make parsing bulletproof
         record = message_splits[i+1].replace('<This message was edited>', '').replace('*', '').strip()
         text_lower = record.lower()
         
         try:
-            msg_ts = parser.parse(ts_str, fuzzy=True, dayfirst=True)
+            # Bulletproof Date Parsing: Follows the UI toggle to adapt to ANY phone's export format
+            msg_ts = parser.parse(ts_str, fuzzy=True, dayfirst=is_dayfirst)
 
             row = {k: "" for k in keys_list}
             row["Time"] = msg_ts.strftime("%H:%M")
-            row["Date"] = msg_ts.strftime("%d/%m/%Y")
+            row["Date"] = msg_ts.strftime("%d/%m/%Y") # Standardizes the final Excel output to DD/MM/YYYY
             row["Shift"] = get_shift(msg_ts.hour)
             
-            # --- Sender Extraction ---
             sender = "Unknown Number"
             s_match = re.search(r'(?:\]|,|-)\s*([^:\n🚨]+):', record)
             if s_match: sender = s_match.group(1).strip()
@@ -58,7 +56,6 @@ def parse_whatsapp_data(text_content, sender_mapping):
             if sender in sender_mapping: sender = sender_mapping[sender]
             row["Shared By"] = sender
 
-            # --- Billets, Heat & Sample Number Tracking ---
             b_match = re.search(r'(\d+)\s*(?:billet|bullet|bilet|billete)', text_lower)
             if not b_match:
                 b_match = re.search(r'(?:billet|bullet|bilet|billete)[^\d\n]*(\d+)', text_lower)
@@ -68,43 +65,35 @@ def parse_whatsapp_data(text_content, sender_mapping):
             row["Billet Qty"] = billets if billets > 0 else ""
             row["Sample No."] = current_sample_no
             
-            # Add billet qty for the NEXT message's sample number
             if billets > 0: current_sample_no += billets
 
-            # --- Size & Details ---
             row["Size"] = get_num(r'size', record)
             
-            # Extract Size Details safely (bounds check prevents grabbing (bar) or (°C))
             sd_match = re.search(r'\(\s*([a-zA-Z\s]+)\s*\)', record[:150])
             if sd_match:
                 val = sd_match.group(1).strip()
                 if val.lower() not in ['bar', 'c', 'mm']:
                     row["Size Details"] = val.title()
             
-            # --- General Parameters ---
             row["Mill Speed m/s"] = get_num(r'sp[e]{1,2}d', record)
             row["Flow Rate m3"] = get_num(r'(?:fl[o]{1,2}w|f[o]{1,2}ll[o]{1,2}w|fl[i]{1,2}w|follow)', record)
             row["FCV%"] = get_num(r'fcv', record)
             
-            # Clean Carriage (removes emojis, arrows, hyphens, digits)
             carriage_match = re.search(r'carriage[\s:,\-\.#=]*([^\n]+)', record, re.IGNORECASE)
             if carriage_match:
                 clean_carriage = re.sub(r'[\d\-\u2192\u2794\u27A1🔵🟡]', '', carriage_match.group(1))
                 row["PQS Carriage"] = clean_carriage.strip()
 
-            # Clean Pumps
             pump_match = re.search(r'pump[s]?[\s:,\-\.#=]*([^\n]+)', record, re.IGNORECASE)
             if pump_match:
                 row["Pumps in Operation"] = pump_match.group(1).strip()
 
-            # --- Typo-Resilient Temperatures ---
             row["After WHF Temp."] = get_num(r'(?:after|afr)\s*whf', record)
             row["WHF Exit Temp At Stand 1 Entry"] = get_num(r'(?:stand|stnd|stad)\s*1', record)
             row["Bar Temp. Before PQS"] = get_num(r'before\s*pqs', record)
             row["Bar Temp at Cooling Bed"] = get_num(r'(?:cooling|coling|c\.?b\.?)', record)
             row["PQS Water Temperature"] = get_num(r'(?:water|watr)\s*temp', record)
 
-            # --- Pressure Logic ---
             found_labeled = False
             for p_idx in range(1, 7):
                 p_match = re.search(rf'(?:\*|\b){p_idx}\s*#\s*\*?\s*(?:->|\u2192|→|:)*\s*(\d+(?:\.\d+)?)', record, re.IGNORECASE)
@@ -112,7 +101,6 @@ def parse_whatsapp_data(text_content, sender_mapping):
                     row[f"P{p_idx}"] = p_match.group(1)
                     found_labeled = True
 
-            # Vertical fallback text alignment (Type 5 message blocks)
             if not found_labeled:
                 naked_nums = []
                 for line in record.split('\n'):
@@ -136,14 +124,24 @@ def parse_whatsapp_data(text_content, sender_mapping):
 st.title("🔥 Quenching Parameters Extractor")
 st.markdown("Upload your WhatsApp chat export to instantly convert raw texts into structured datasets.")
 
-# Sidebar Configuration
 with st.sidebar:
     st.header("⚙️ Configuration")
-    st.subheader("Employee Name Mapping")
-    st.write("Map raw WhatsApp numbers to your staff names below.")
+    
+    # NEW UI TOGGLE: Ultimate Date Format Control
+    st.subheader("📅 Date Format Setting")
+    st.markdown("How does your specific phone export dates?")
+    date_format_choice = st.radio(
+        "Select format:",
+        options=["Month First (US: 5/24/2026)", "Day First (UK/EU: 24/05/2026)"],
+        index=0
+    )
+    user_is_dayfirst = True if "Day First" in date_format_choice else False
+    
+    st.divider()
+    
+    st.subheader("👥 Employee Name Mapping")
     mapping_file = "saved_senders.json"
     
-    # Pre-baked user staff database configuration
     default_list = [
         {"Raw Number/Name": "+92 346 2727806", "Employee Name": "Shahzad"},
         {"Raw Number/Name": "+92 315 8139861", "Employee Name": "Umair"},
@@ -173,29 +171,26 @@ with st.sidebar:
 
     sender_dict = dict(zip(edited_mapping["Raw Number/Name"], edited_mapping["Employee Name"]))
 
-# Main Area
 st.header("📤 Upload & Process")
 uploaded_file = st.file_uploader("Upload WhatsApp Text File (.txt)", type=["txt"])
 
 if uploaded_file is not None:
     @st.cache_data
-    def load_data(file_content, mapping):
-        return parse_whatsapp_data(file_content, mapping)
+    def load_data(file_content, mapping, dayfirst_flag):
+        return parse_whatsapp_data(file_content, mapping, dayfirst_flag)
 
     content = uploaded_file.read().decode("utf-8", errors="ignore")
     
     with st.spinner('Parsing logs...'):
-        result_df = load_data(content, sender_dict)
+        result_df = load_data(content, sender_dict, user_is_dayfirst)
         
     if result_df.empty:
         st.warning("No records found in the log file.")
     else:
-        # Create helper timestamp for internal filtering
         result_df['_parsed_dt'] = pd.to_datetime(result_df['Date'], format='%d/%m/%Y')
         min_date = result_df['_parsed_dt'].min().date()
         max_date = result_df['_parsed_dt'].max().date()
         
-        # Dynamic Date Filtering based entirely on the contents of the file!
         st.sidebar.divider()
         st.sidebar.subheader("⏳ Filter by Date Range")
         if min_date == max_date:
@@ -214,13 +209,11 @@ if uploaded_file is not None:
             else:
                 filtered_df = result_df
         
-        # Filter by Shift
         available_shifts = sorted(filtered_df['Shift'].unique().tolist())
         selected_shifts = st.sidebar.multiselect("Filter by Shift(s)", available_shifts, default=available_shifts)
         
         final_df = filtered_df[filtered_df['Shift'].isin(selected_shifts)].copy()
         
-        # Clean up the temporary parsing column before rendering
         if '_parsed_dt' in final_df.columns:
             final_df = final_df.drop(columns=['_parsed_dt'])
             
@@ -230,7 +223,6 @@ if uploaded_file is not None:
         st.divider()
         st.subheader("💾 Export Data")
         
-        # Excel Download Button
         buffer = io.BytesIO()
         final_df.to_excel(buffer, index=False)
         st.download_button(
