@@ -16,7 +16,7 @@ def get_shift(hour):
     elif 16 <= hour < 23: return 'B'
     else: return 'C'
 
-def parse_whatsapp_data(text_content, sender_mapping, is_dayfirst):
+def parse_whatsapp_data(text_content, sender_mapping, is_dayfirst_input, is_dayfirst_output, is_12hr):
     timestamp_pattern = r'(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4}(?:,?\s+|\s+)\d{1,2}[:\.]\d{2}(?:\s*[APap][Mm])?)'
     message_splits = re.split(timestamp_pattern, text_content)
 
@@ -41,14 +41,29 @@ def parse_whatsapp_data(text_content, sender_mapping, is_dayfirst):
         text_lower = record.lower()
         
         try:
-            # Bulletproof Date Parsing: Follows the UI toggle to adapt to ANY phone's export format
-            msg_ts = parser.parse(ts_str, fuzzy=True, dayfirst=is_dayfirst)
+            # Tell the parser exactly how to read the incoming file
+            msg_ts = parser.parse(ts_str, fuzzy=True, dayfirst=is_dayfirst_input)
 
             row = {k: "" for k in keys_list}
-            row["Time"] = msg_ts.strftime("%H:%M")
-            row["Date"] = msg_ts.strftime("%d/%m/%Y") # Standardizes the final Excel output to DD/MM/YYYY
+            
+            # --- Apply User Preferred Time Format ---
+            if is_12hr:
+                row["Time"] = msg_ts.strftime("%I:%M %p")
+            else:
+                row["Time"] = msg_ts.strftime("%H:%M")
+                
+            # --- Apply User Preferred Date Format ---
+            if is_dayfirst_output:
+                row["Date"] = msg_ts.strftime("%d/%m/%Y")
+            else:
+                row["Date"] = msg_ts.strftime("%m/%d/%Y")
+                
             row["Shift"] = get_shift(msg_ts.hour)
             
+            # Keep a hidden raw date object so the filter system never breaks
+            row["_dt_obj"] = msg_ts.date()
+            
+            # --- Sender Extraction ---
             sender = "Unknown Number"
             s_match = re.search(r'(?:\]|,|-)\s*([^:\n🚨]+):', record)
             if s_match: sender = s_match.group(1).strip()
@@ -56,6 +71,7 @@ def parse_whatsapp_data(text_content, sender_mapping, is_dayfirst):
             if sender in sender_mapping: sender = sender_mapping[sender]
             row["Shared By"] = sender
 
+            # --- Billets, Heat & Sample Number Tracking ---
             b_match = re.search(r'(\d+)\s*(?:billet|bullet|bilet|billete)', text_lower)
             if not b_match:
                 b_match = re.search(r'(?:billet|bullet|bilet|billete)[^\d\n]*(\d+)', text_lower)
@@ -67,6 +83,7 @@ def parse_whatsapp_data(text_content, sender_mapping, is_dayfirst):
             
             if billets > 0: current_sample_no += billets
 
+            # --- Size & Details ---
             row["Size"] = get_num(r'size', record)
             
             sd_match = re.search(r'\(\s*([a-zA-Z\s]+)\s*\)', record[:150])
@@ -75,6 +92,7 @@ def parse_whatsapp_data(text_content, sender_mapping, is_dayfirst):
                 if val.lower() not in ['bar', 'c', 'mm']:
                     row["Size Details"] = val.title()
             
+            # --- General Parameters ---
             row["Mill Speed m/s"] = get_num(r'sp[e]{1,2}d', record)
             row["Flow Rate m3"] = get_num(r'(?:fl[o]{1,2}w|f[o]{1,2}ll[o]{1,2}w|fl[i]{1,2}w|follow)', record)
             row["FCV%"] = get_num(r'fcv', record)
@@ -88,12 +106,14 @@ def parse_whatsapp_data(text_content, sender_mapping, is_dayfirst):
             if pump_match:
                 row["Pumps in Operation"] = pump_match.group(1).strip()
 
+            # --- Typo-Resilient Temperatures ---
             row["After WHF Temp."] = get_num(r'(?:after|afr)\s*whf', record)
             row["WHF Exit Temp At Stand 1 Entry"] = get_num(r'(?:stand|stnd|stad)\s*1', record)
             row["Bar Temp. Before PQS"] = get_num(r'before\s*pqs', record)
             row["Bar Temp at Cooling Bed"] = get_num(r'(?:cooling|coling|c\.?b\.?)', record)
             row["PQS Water Temperature"] = get_num(r'(?:water|watr)\s*temp', record)
 
+            # --- Pressure Logic ---
             found_labeled = False
             for p_idx in range(1, 7):
                 p_match = re.search(rf'(?:\*|\b){p_idx}\s*#\s*\*?\s*(?:->|\u2192|→|:)*\s*(\d+(?:\.\d+)?)', record, re.IGNORECASE)
@@ -127,15 +147,35 @@ st.markdown("Upload your WhatsApp chat export to instantly convert raw texts int
 with st.sidebar:
     st.header("⚙️ Configuration")
     
-    # NEW UI TOGGLE: Ultimate Date Format Control
-    st.subheader("📅 Date Format Setting")
-    st.markdown("How does your specific phone export dates?")
-    date_format_choice = st.radio(
-        "Select format:",
-        options=["Month First (US: 5/24/2026)", "Day First (UK/EU: 24/05/2026)"],
-        index=0
+    # NEW FORMAT CONTROL CENTER
+    st.subheader("📅 Date & Time Formats")
+    
+    st.markdown("**1. How does your phone export dates?**")
+    input_date_format = st.radio(
+        "Parser Reading Format:",
+        options=["Month First (US: 5/24/2026)", "Day First (UK: 24/05/2026)"],
+        index=0,
+        label_visibility="collapsed"
     )
-    user_is_dayfirst = True if "Day First" in date_format_choice else False
+    user_is_dayfirst_input = True if "Day First" in input_date_format else False
+    
+    st.markdown("**2. How do you want dates in Excel?**")
+    output_date_format = st.radio(
+        "Excel Date Format:",
+        options=["MM/DD/YYYY", "DD/MM/YYYY"],
+        index=1,
+        label_visibility="collapsed"
+    )
+    user_is_dayfirst_output = True if "DD/MM" in output_date_format else False
+    
+    st.markdown("**3. How do you want time in Excel?**")
+    output_time_format = st.radio(
+        "Excel Time Format:",
+        options=["12-Hour (08:15 PM)", "24-Hour (20:15)"],
+        index=0,
+        label_visibility="collapsed"
+    )
+    user_is_12hr = True if "12-Hour" in output_time_format else False
     
     st.divider()
     
@@ -176,26 +216,26 @@ uploaded_file = st.file_uploader("Upload WhatsApp Text File (.txt)", type=["txt"
 
 if uploaded_file is not None:
     @st.cache_data
-    def load_data(file_content, mapping, dayfirst_flag):
-        return parse_whatsapp_data(file_content, mapping, dayfirst_flag)
+    def load_data(file_content, mapping, dayfirst_in, dayfirst_out, is_12h):
+        return parse_whatsapp_data(file_content, mapping, dayfirst_in, dayfirst_out, is_12h)
 
     content = uploaded_file.read().decode("utf-8", errors="ignore")
     
     with st.spinner('Parsing logs...'):
-        result_df = load_data(content, sender_dict, user_is_dayfirst)
+        result_df = load_data(content, sender_dict, user_is_dayfirst_input, user_is_dayfirst_output, user_is_12hr)
         
     if result_df.empty:
         st.warning("No records found in the log file.")
     else:
-        result_df['_parsed_dt'] = pd.to_datetime(result_df['Date'], format='%d/%m/%Y')
-        min_date = result_df['_parsed_dt'].min().date()
-        max_date = result_df['_parsed_dt'].max().date()
+        # Use the hidden raw date object to filter flawlessly regardless of text format
+        min_date = result_df['_dt_obj'].min()
+        max_date = result_df['_dt_obj'].max()
         
         st.sidebar.divider()
         st.sidebar.subheader("⏳ Filter by Date Range")
         if min_date == max_date:
             selected_date = st.sidebar.date_input("Logs Date Found", value=min_date)
-            filtered_df = result_df[result_df['_parsed_dt'].dt.date == selected_date]
+            filtered_df = result_df[result_df['_dt_obj'] == selected_date]
         else:
             selected_range = st.sidebar.date_input(
                 "Select Date Window",
@@ -205,7 +245,7 @@ if uploaded_file is not None:
             )
             if isinstance(selected_range, tuple) and len(selected_range) == 2:
                 s_date, e_date = selected_range
-                filtered_df = result_df[(result_df['_parsed_dt'].dt.date >= s_date) & (result_df['_parsed_dt'].dt.date <= e_date)]
+                filtered_df = result_df[(result_df['_dt_obj'] >= s_date) & (result_df['_dt_obj'] <= e_date)]
             else:
                 filtered_df = result_df
         
@@ -214,8 +254,9 @@ if uploaded_file is not None:
         
         final_df = filtered_df[filtered_df['Shift'].isin(selected_shifts)].copy()
         
-        if '_parsed_dt' in final_df.columns:
-            final_df = final_df.drop(columns=['_parsed_dt'])
+        # Strip out the hidden datetime object before showing/exporting the data
+        if '_dt_obj' in final_df.columns:
+            final_df = final_df.drop(columns=['_dt_obj'])
             
         st.success(f"Showing {len(final_df)} records matching filters!")
         st.dataframe(final_df, use_container_width=True)
@@ -228,7 +269,7 @@ if uploaded_file is not None:
         st.download_button(
             label="📥 Download as Excel (.xlsx)",
             data=buffer.getvalue(),
-            file_name=f"Quenching_Parameters_Export.xlsx",
+            file_name="Quenching_Parameters_Export.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True
         )
