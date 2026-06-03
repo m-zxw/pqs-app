@@ -16,7 +16,7 @@ def get_shift(hour):
     elif 16 <= hour < 23: return 'B'
     else: return 'C'
 
-def parse_whatsapp_data(text_content, start_filter, end_filter, sender_mapping):
+def parse_whatsapp_data(text_content, sender_mapping):
     timestamp_pattern = r'(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4}(?:,?\s+|\s+)\d{1,2}[:\.]\d{2}(?:\s*[APap][Mm])?)'
     message_splits = re.split(timestamp_pattern, text_content)
 
@@ -44,7 +44,6 @@ def parse_whatsapp_data(text_content, start_filter, end_filter, sender_mapping):
         
         try:
             msg_ts = parser.parse(ts_str, fuzzy=True, dayfirst=True)
-            if not (start_filter <= msg_ts <= end_filter): continue
 
             row = {k: "" for k in keys_list}
             row["Time"] = msg_ts.strftime("%H:%M")
@@ -108,13 +107,12 @@ def parse_whatsapp_data(text_content, start_filter, end_filter, sender_mapping):
             # --- Pressure Logic ---
             found_labeled = False
             for p_idx in range(1, 7):
-                # Handles formats like "1# 10", "1# -> 10", "1# → 03", etc.
-                p_match = re.search(rf'{p_idx}\s*[#\.\-\:]*\s*(?:->|\u2192|→)*\s*(\d+(?:\.\d+)?)', record, re.IGNORECASE)
+                p_match = re.search(rf'(?:\*|\b){p_idx}\s*#\s*\*?\s*(?:->|\u2192|→|:)*\s*(\d+(?:\.\d+)?)', record, re.IGNORECASE)
                 if p_match: 
                     row[f"P{p_idx}"] = p_match.group(1)
                     found_labeled = True
 
-            # Vertical fallback (Type 5 message): If they just typed "4 \n 4 \n 12" on new lines
+            # Vertical fallback text alignment (Type 5 message blocks)
             if not found_labeled:
                 naked_nums = []
                 for line in record.split('\n'):
@@ -122,7 +120,6 @@ def parse_whatsapp_data(text_content, start_filter, end_filter, sender_mapping):
                     if re.match(r'^[\s]*(\d+(?:\.\d+)?)[\s]*$', cln):
                         naked_nums.append(cln.strip())
                 
-                # Maps directly to P1-P6 if 1 to 6 standalone numbers exist
                 if 0 < len(naked_nums) <= 6:
                     for p_idx, val in enumerate(naked_nums):
                         row[f"P{p_idx+1}"] = val
@@ -133,7 +130,6 @@ def parse_whatsapp_data(text_content, start_filter, end_filter, sender_mapping):
             continue
 
     df = pd.DataFrame(all_data)
-    # Strictly returns dataframe in exact sequential order of the chat log. 
     return df
 
 # --- UI DESIGN ---
@@ -143,26 +139,11 @@ st.markdown("Upload your WhatsApp chat export to instantly convert raw texts int
 # Sidebar Configuration
 with st.sidebar:
     st.header("⚙️ Configuration")
-    
-    st.subheader("1. Select Date & Time Range")
-    col1, col2 = st.columns(2)
-    with col1:
-        start_date = st.date_input("Start Date")
-        start_time = st.time_input("Start Time", value=datetime.strptime("00:00", "%H:%M").time())
-    with col2:
-        end_date = st.date_input("End Date")
-        end_time = st.time_input("End Time", value=datetime.strptime("23:59", "%H:%M").time())
-        
-    start_dt = datetime.combine(start_date, start_time)
-    end_dt = datetime.combine(end_date, end_time)
-    
-    st.divider()
-    
-    st.subheader("2. Employee Name Mapping")
+    st.subheader("Employee Name Mapping")
     st.write("Map raw WhatsApp numbers to your staff names below.")
     mapping_file = "saved_senders.json"
     
-   # Load logic
+    # Pre-baked user staff database configuration
     default_list = [
         {"Raw Number/Name": "+92 346 2727806", "Employee Name": "Shahzad"},
         {"Raw Number/Name": "+92 315 8139861", "Employee Name": "Umair"},
@@ -177,9 +158,9 @@ with st.sidebar:
             with open(mapping_file, "r") as f:
                 current_list = json.load(f)
         except:
-            current_list = default_list # Uses the full list if file breaks
+            current_list = default_list
     else:
-        current_list = default_list # Uses the full list on first run
+        current_list = default_list
         
     edited_mapping = st.data_editor(pd.DataFrame(current_list), num_rows="dynamic", use_container_width=True)
     
@@ -197,38 +178,65 @@ st.header("📤 Upload & Process")
 uploaded_file = st.file_uploader("Upload WhatsApp Text File (.txt)", type=["txt"])
 
 if uploaded_file is not None:
-    # Caches the parsed data so it doesn't reload the file endlessly
     @st.cache_data
-    def load_data(file_content, start_d, end_d, mapping):
-        return parse_whatsapp_data(file_content, start_d, end_d, mapping)
+    def load_data(file_content, mapping):
+        return parse_whatsapp_data(file_content, mapping)
 
     content = uploaded_file.read().decode("utf-8", errors="ignore")
     
     with st.spinner('Parsing logs...'):
-        result_df = load_data(content, start_dt, end_dt, sender_dict)
+        result_df = load_data(content, sender_dict)
         
     if result_df.empty:
-        st.warning("No records found in the selected range.")
+        st.warning("No records found in the log file.")
     else:
-        st.success(f"Extracted {len(result_df)} records!")
+        # Create helper timestamp for internal filtering
+        result_df['_parsed_dt'] = pd.to_datetime(result_df['Date'], format='%d/%m/%Y')
+        min_date = result_df['_parsed_dt'].min().date()
+        max_date = result_df['_parsed_dt'].max().date()
+        
+        # Dynamic Date Filtering based entirely on the contents of the file!
+        st.sidebar.divider()
+        st.sidebar.subheader("⏳ Filter by Date Range")
+        if min_date == max_date:
+            selected_date = st.sidebar.date_input("Logs Date Found", value=min_date)
+            filtered_df = result_df[result_df['_parsed_dt'].dt.date == selected_date]
+        else:
+            selected_range = st.sidebar.date_input(
+                "Select Date Window",
+                value=(min_date, max_date),
+                min_value=min_date,
+                max_value=max_date
+            )
+            if isinstance(selected_range, tuple) and len(selected_range) == 2:
+                s_date, e_date = selected_range
+                filtered_df = result_df[(result_df['_parsed_dt'].dt.date >= s_date) & (result_df['_parsed_dt'].dt.date <= e_date)]
+            else:
+                filtered_df = result_df
         
         # Filter by Shift
-        available_shifts = sorted(result_df['Shift'].unique().tolist())
-        selected_shifts = st.multiselect("Filter by Shift(s)", available_shifts, default=available_shifts)
+        available_shifts = sorted(filtered_df['Shift'].unique().tolist())
+        selected_shifts = st.sidebar.multiselect("Filter by Shift(s)", available_shifts, default=available_shifts)
         
-        filtered_df = result_df[result_df['Shift'].isin(selected_shifts)]
-        st.dataframe(filtered_df, use_container_width=True)
+        final_df = filtered_df[filtered_df['Shift'].isin(selected_shifts)].copy()
+        
+        # Clean up the temporary parsing column before rendering
+        if '_parsed_dt' in final_df.columns:
+            final_df = final_df.drop(columns=['_parsed_dt'])
+            
+        st.success(f"Showing {len(final_df)} records matching filters!")
+        st.dataframe(final_df, use_container_width=True)
         
         st.divider()
         st.subheader("💾 Export Data")
         
         # Excel Download Button
         buffer = io.BytesIO()
-        filtered_df.to_excel(buffer, index=False)
+        final_df.to_excel(buffer, index=False)
         st.download_button(
             label="📥 Download as Excel (.xlsx)",
             data=buffer.getvalue(),
-            file_name=f"Quenching_Parameters_{start_date.strftime('%Y%m%d')}.xlsx",
+            file_name=f"Quenching_Parameters_Export.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True
         )
